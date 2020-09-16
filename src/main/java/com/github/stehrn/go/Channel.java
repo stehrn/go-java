@@ -4,44 +4,47 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Provide a mechanism to synchronize routines that need to send and receive the resources they need to share between
- * each other. A channel will guarantee synchronous communication and exchange of data between routines.
+ * When data needs to be shared between routines, a {@code Channel} will act as a facilitator, and guarantee the synchronous
+ * communication and exchange of data between routines.
  * <p>
- * When declaring a channel, the type of data that will be shared needs to be specified, and can be done using one
- * of the two factory methods, to create either a buffered or unbuffered channel.
+ * When declaring a {@code Channel}, the type of data that will be shared needs to be specified, and can be done using one
+ * of the two {@code channel} factory methods, to create either a buffered or unbuffered channel.
  * <p>
  * Unbuffered channel of strings
- * <code>
+ * <pre> {@code
  * Channel<String> unbuffered = channel();
- * </code>
+ * }</pre>
  * <p>
  * Buffered channel of strings
- * <code>
+ * <pre> {@code
  * Channel<String> buffered = channel(10);
- * </code>
+ * }</pre>
  * <p>
- * To send a value into a channel use send(T item):
+ * To send a value into a channel use {@code send(T value)}:
  *
- * <code>
+ * <pre> {@code
  * Channel<String> unbuffered = channel();
- * unbuffered.send("Sample message");
- * </code>
+ * unbuffered.send("message");
+ * }</pre>
  * <p>
- * To receive the above string from the channel use receive():
+ * To receive the above string from the channel use {@code receive()}:
  *
- * <code>
+ * <pre> {@code
  * String message = unbuffered.receive();
- * assertThat(message, is("Sample message"))
- * </code>
+ * assertThat(message, is("message"))
+ * }</pre>
+ *
+ * An {@code ExecutorService} is used to help control closing the channel and the interruption of any threads
+ * currently blocked; care is also taken not to interrupt the borrowed thread making the blocking call.
  */
 public class Channel<T> {
 
-    private final BlockingQueue<T> items;
+    private final BlockingQueue<T> values;
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
     private final ExecutorService service = Executors.newCachedThreadPool();
 
-    private Channel(BlockingQueue<T> items) {
-        this.items = items;
+    private Channel(BlockingQueue<T> values) {
+        this.values = values;
     }
 
     /**
@@ -62,13 +65,19 @@ public class Channel<T> {
     }
 
     // equivalent to <- operator in go
-    public void send(T item) {
+
+    /**
+     * Send a value into the channel (equivalent to @code{channel <- "message"} in go)
+     *
+     * @param value value to send into channel
+     */
+    public void send(T value) {
         if (isClosed.get()) {
             throw new ChannelException("Channel is closed");
         }
 
         try {
-            Future<Void> future = service.submit(put(item));
+            Future<Void> future = service.submit(put(value));
             future.get();
         } catch (InterruptedException | CancellationException | RejectedExecutionException e) {
             handleException(e);
@@ -77,7 +86,10 @@ public class Channel<T> {
         }
     }
 
-    // equivalent to -> operator in go
+    /**
+     * Receive a value from the channel (equivalent to @code{message := <-channel} in go)
+     * @return value from channel
+     */
     public T receive() {
         if (isClosed.get()) {
             return null;
@@ -93,17 +105,28 @@ public class Channel<T> {
         }
     }
 
+    /**
+     * Returns channel result from channel
+     * @return channel result from channel
+     */
     public ChannelResult<T> result() {
-        T item = receive();
-        return new ChannelResult<>(item, item == null);
+        T value = receive();
+        return new ChannelResult<>(value, value == null);
     }
 
+    /**
+     * Close the channel, any threads blocking on one of methods to send or receive a value from the channel
+     * will become unblocked.
+     *
+     * A call to {@code receive()} will immediately return null, whist a call to {@code result()} will return
+     * a result with a null value and a call to {@code ChannelResult.isClosed()} will return {@code true}
+     */
     public void close() {
         if (isClosed.getAndSet(true)) {
             throw new ChannelException("Channel already closed");
         }
 
-        service.shutdownNow(); // will cause Thread blocked on items.take() to be interrupted
+        service.shutdownNow(); // will cause Thread blocked on items.take() and/or items.out() to be interrupted
 
         try {
             boolean isShutdown = service.awaitTermination(1000, TimeUnit.MILLISECONDS);
@@ -118,17 +141,17 @@ public class Channel<T> {
     private Callable<T> take() {
         return () -> {
             try {
-                return items.take();
+                return values.take(); // this can block
             } catch (InterruptedException e) {
                 return handleException(e);
             }
         };
     }
 
-    private Callable<Void> put(T item) {
+    private Callable<Void> put(T value) {
         return () -> {
             try {
-                items.put(item);
+                values.put(value); // this can block
                 return null;
             } catch (InterruptedException e) {
                 handleException(e);
@@ -162,6 +185,5 @@ public class Channel<T> {
         public boolean isClosed() {
             return isClosed;
         }
-
     }
 }

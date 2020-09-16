@@ -3,9 +3,7 @@ package com.github.stehrn.go;
 import com.github.stehrn.go.Channel.ChannelResult;
 import org.junit.Test;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -13,7 +11,8 @@ import static com.github.stehrn.go.Channel.channel;
 import static com.github.stehrn.go.Routine.go;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 
 public class UnbufferedChannelTest {
 
@@ -191,5 +190,18 @@ public class UnbufferedChannelTest {
         unbounded.close();
         // we expect to fall through to countdown
         latch.await();
+    }
+
+    @Test(timeout = 1000)
+    public void simpleTest() {
+        Channel<String> unbounded = channel();
+        go(() -> unbounded.send("A"));
+        go(() -> unbounded.send("B"));
+        go(() -> unbounded.send("C"));
+        Set<String> results = new TreeSet<>();
+        for (int i = 0; i < 3; i++) {
+            results.add(unbounded.receive());
+        }
+        assertThat(results.toString(), is("[A, B, C]"));
     }
 }
