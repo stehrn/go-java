@@ -1,16 +1,95 @@
 # Overview
-_go-java - a simple java library that has some go like features_
+_go-java - a simple java library that has some go like features and advice for high-throughput concurrent applications_
 
-If you like the go concurrency features of _routines_ and _channels_, then this library gives you a similar experience for Java code.
+If you like the go concurrency features of _routines_ and _channels_, then this library gives you a similar experience for Java code ...  with some caveats that will be discussed.
+
+
+## Summary
+To get anything comparable to a `goroutine` in Java we look an alternative OpenJDK called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) that provides 'virtual threads', a new implementation of `Thread` that differs in memory footprint and scheduling.
+
+A `Channel` can be implemented using the existing core Java API - an `ExecutorService`, `SynchronousQueue` and `ArrayBlockingQueue`. 
+
 
 ## Routines
-Java does not have anything that is equivalent to a `goroutine`, the nearest match is to use a `Thread`. 
+Java does not have anything that is equivalent to a `goroutine`, the nearest match is a `Thread`, unlike Java threads though, you can run many more goroutines on a typical system, they will have a lower memory footprint, and will perform much better. 
 
-A `goroutine` is a lightweight thread managed by the Go runtime.
+### Java Threads
+So whats the problem with Threads? In a nutshell, they are implemented in the JDK as trivial wrappers around operating system (OS) threads, which introduces the following problems ...
 
-Every Java thread requires an operating system thread and a large stack space, so results in a larger memory footprint. 
+#### OS thread limit
+If you try and create too many OS threads you'll get:
+```java
+[error] (run-main-0) java.lang.OutOfMemoryError: unable to create native thread
+```
+On my macbook I could create 2048 threads before "running out of memory", this is actually linked to the `kern.num_taskthreads` setting of 2048, so problem here was no so much to do with memory, but the number of threads the OS supports for my user.  
 
-So although there is a `go` routine, it's all but in name, for now.
+#### Large thread stack size 
+OS threads have a high memory footprint comes from the fact each thread has a fixed (stack) size - the (64-bit) default is 1MB, and whilst this can be reduced using the `-Xss` java flag, setting it too low will lead to runtime `StackOverflowError`, at this point you need to increase stack size, or re-write code to use less stack space (e.g. remove recursive method calls).
+
+#### Slow scheduling
+Another side effect of using OS threads is the performance impact introduced by OS kernel based thread scheduling (i.e. assigning hardware resources to them).   
+
+There will typically be more Java threads than there are OS threads (cores), this is where the OS scheduler comes in, it will will try and give each thread a fair share of the CPU time. If a thread goes into a wait state (e.g. waiting for a database call), the thread will be marked as paused and a different thread is allocated to the OS thread - this is known as a context switch.
+
+TODO: so what is cost here? 
+
+#### Slow creation
+Creating Threads  requires allocating OS resources, which is slow.
+
+Things which cost a lot to create are typically pooled, and that's why we have the various flavours of `ExecutorService`. And if there's not enough threads in the pool to support the all the concurrent tasks that needs to run at a single point in time? They generally have to wait in line, with the risk of been rejected. Asynchronous programming is an approach to address this, but not everything fits this approach.  
+
+#### So what can we do?
+This is probably as good as it gets, a cached thread pool that will create new threads as needed, but will reuse previously constructed threads when they are available - the only limitation for a cached thread pool is the available system resources, as we've observed already when we ran out of native OS threads.
+
+```java
+static final ExecutorService service = Executors.newCachedThreadPool();
+
+    static void go(Runnable r) {
+        service.submit(r);
+    }
+```
+    
+### How does `go` do it better?
+
+
+### What can we do to make Java better?
+So what can we do about this? Use a better JVM :) And there is one out there, it's under development, and its called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) and is part of the OpenJDK community.
+
+![`Loom`](img/loom.png)
+
+Its mission is to:
+ 
+_... drastically reduce the effort of writing, maintaining, and observing high-throughput concurrent applications that make the best use of available hardware._
+
+..the feature we want is a [_virtual thread_](http://cr.openjdk.java.net/~rpressler/loom/loom/sol1_part1.html):
+```java
+static void go(Runnable r) {
+   Thread.startVirtualThread(r);
+}
+```
+A virtual thread is a (type of) `java.lang.Thread` — in code, at runtime, not a wrapper around an OS thread, but a Java object, known to the VM, and under the direct control of the Java runtime which maps multiple virtual threads onto the same OS thread and control their execution, suspending and resuming.
+
+Creating one is cheap — we can have millions and don’t need to pool them!
+
+
+ 
+
+![`Threads`](img/threads.png)
+
+features:
+
+* re-sizeble stacks that can change over time - so much smaller memory footprint 
+* faster task switching, so more performant
+
+assign lots of v threads (miilions) to small number of processor (multiplexed on top of OS threads)
+
+
+platofrm threads - 1 -1 mapping bwrtwen Java Thread and 
+many virt threads to many 
+
+
+
+Testing performance of the 
 
 ## Channels
 When data needs to be shared between routines, a `Channel` will act as a pipe and guarantee the synchronous exchange of data. 
@@ -71,7 +150,10 @@ A buffered channel has capacity to hold one or more values before they are recei
 the same time to perform sends and receives. Blocking can still occur - a send will block if the buffer is full, and 
 receive will block if the buffer is empty. It's essentially a `BlockingQueue`
 
- 
 
+# Resources
+Some articles that helped contribute to content in this post
 
-
+* https://www.baeldung.com/openjdk-project-loom
+* https://developers.redhat.com/blog/2019/06/19/project-loom-lightweight-java-threads/
+* https://rcoh.me/posts/why-you-can-have-a-million-go-routines-but-only-1000-java-threads/
