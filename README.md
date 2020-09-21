@@ -5,7 +5,7 @@ If you like the go concurrency features of _routines_ and _channels_, then this 
 
 
 ## Summary
-To get anything comparable to a `goroutine` in Java we look an alternative OpenJDK called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) that provides 'virtual threads', a new implementation of `Thread` that differs in memory footprint and scheduling.
+To get anything comparable to a `goroutine` in Java we look at an alternative OpenJDK called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) that provides 'virtual threads', a new implementation of `Thread` that differs in memory footprint and scheduling.
 
 A `Channel` can be implemented using the existing core Java API - an `ExecutorService`, `SynchronousQueue` and `ArrayBlockingQueue`. 
 
@@ -21,10 +21,10 @@ If you try and create too many OS threads you'll get:
 ```java
 [error] (run-main-0) java.lang.OutOfMemoryError: unable to create native thread
 ```
-On my macbook I could create 2048 threads before "running out of memory", this is actually linked to the `kern.num_taskthreads` setting of 2048, so problem here was no so much to do with memory, but the number of threads the OS supports for my user.  
+On my macbook I could create 2048 threads before "running out of memory", this is actually linked to the `kern.num_taskthreads` setting of 2048, so problem here was not so much to do with memory, but the number of threads the OS supports for my user. All platforms will impost limits though.  
 
 #### Large thread stack size 
-OS threads have a high memory footprint comes from the fact each thread has a fixed (stack) size - the (64-bit) default is 1MB, and whilst this can be reduced using the `-Xss` java flag, setting it too low will lead to runtime `StackOverflowError`, at this point you need to increase stack size, or re-write code to use less stack space (e.g. remove recursive method calls).
+OS threads have a high memory footprint because each thread has a fixed (stack) size - the (64-bit) default is 1MB, and whilst this can be reduced using the `-Xss` flag, setting it too low will lead to a runtime `StackOverflowError`, at this point you need to increase stack size, or re-write the code to use less stack space (e.g. remove recursive method calls).
 
 #### Slow scheduling
 Another side effect of using OS threads is the performance impact introduced by OS kernel based thread scheduling (i.e. assigning hardware resources to them).   
@@ -44,15 +44,15 @@ This is probably as good as it gets, a cached thread pool that will create new t
 ```java
 static final ExecutorService service = Executors.newCachedThreadPool();
 
-    static void go(Runnable r) {
-        service.submit(r);
-    }
+static void go(Runnable r) {
+    service.submit(r);
+}
 ```
     
-### How does `go` do it better?
+### How does go do it better?
+TODO
 
-
-### What can we do to make Java better?
+### How can we make Java more like go?
 So what can we do about this? Use a better JVM :) And there is one out there, it's under development, and its called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) and is part of the OpenJDK community.
 
 ![`Loom`](img/loom.png)
@@ -67,29 +67,29 @@ static void go(Runnable r) {
    Thread.startVirtualThread(r);
 }
 ```
-A virtual thread is a (type of) `java.lang.Thread` — in code, at runtime, not a wrapper around an OS thread, but a Java object, known to the VM, and under the direct control of the Java runtime which maps multiple virtual threads onto the same OS thread and control their execution, suspending and resuming.
-
-Creating one is cheap — we can have millions and don’t need to pool them!
-
-
- 
+A virtual thread is a (type of) `java.lang.Thread` — it's not a wrapper around an OS thread, but a Java object, known to the VM, and under the direct control of the Java runtime which, unlike the original Java platform thread's 1:1 mapping, maps (multiplexes) multiple virtual threads onto an OS thread:
 
 ![`Threads`](img/threads.png)
 
-features:
+(image sourced from [inside.java](https://inside.java/2020/07/29/loom-accentodev/))
 
-* re-sizeble stacks that can change over time - so much smaller memory footprint 
-* faster task switching, so more performant
+This means it's possible to create many more virtual threads (millions versus thousands on my mac OS), and each is relatively cheap to create - this also means we no longer need thread pools - if we need a thread, we just create a new one.
 
-assign lots of v threads (miilions) to small number of processor (multiplexed on top of OS threads)
+The JVM, and not the OS scheduler, controls the execution, suspending and resuming of virtual threads, which means lower context switching costs/faster task switching, leading to greater performance. This design also enables re-sizeble stacks that can change over time, leading to a much smaller memory footprint.
 
+### Lets do some testing!
 
-platofrm threads - 1 -1 mapping bwrtwen Java Thread and 
-many virt threads to many 
+#### Thread volume
+Lets start off with understanding difference in number of threads that can be created. 
 
+As noted earlier, my mac OS limits a user to the creation of 2048 OS threads, so I can only create 2048 Java Threads. So if I create 2048 virtual threads, how many OS threads will they be multiplex onto? The answer is .. 26 for my run, as can be seen from this JConsole:  
+  
+![`loom`](img/jconsole_loom.png)
 
+(these tests we're performed using [ThreadNumberTest.java](/src/test/java/com/github/stehrn/go/ThreadNumberTest.java))
 
-Testing performance of the 
+#### Thread xxx
+
 
 ## Channels
 When data needs to be shared between routines, a `Channel` will act as a pipe and guarantee the synchronous exchange of data. 
