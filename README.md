@@ -14,7 +14,7 @@ A `Channel` can be implemented using the existing core Java API - an `ExecutorSe
 Java does not have anything that is equivalent to a `goroutine`, the nearest match is a `Thread`, unlike Java threads though, you can run many more goroutines on a typical system, they will have a lower memory footprint, and will perform much better. 
 
 ### Java Threads
-So whats the problem with Threads? In a nutshell, they are implemented in the JDK as trivial wrappers around operating system (OS) threads, which introduces the following problems ...
+So whats the problem with Threads? In a nutshell, they are implemented in the JDK as trivial wrappers around operating system (OS) threads which introduces the following problems ...
 
 #### OS thread limit
 If you try and create too many OS threads you'll get:
@@ -26,17 +26,19 @@ On my macbook I could create 2048 threads before "running out of memory", this i
 #### Large thread stack size 
 OS threads have a high memory footprint because each thread has a fixed (stack) size - the (64-bit) default is 1MB, and whilst this can be reduced using the `-Xss` flag, setting it too low will lead to a runtime `StackOverflowError`, at this point you need to increase stack size, or re-write the code to use less stack space (e.g. remove recursive method calls).
 
+As you continue to create more and more threads, if you don't hit the OS thread limit, you'll eventually exhaust the native memory available for thread stacks and get the same `OutOfMemoryError` as above. Reducing the stack size can help here, but at the risk of a `StackOverflowError`! 
+
 #### Slow scheduling
 Another side effect of using OS threads is the performance impact introduced by OS kernel based thread scheduling (i.e. assigning hardware resources to them).   
 
-There will typically be more Java threads than there are OS threads (cores), this is where the OS scheduler comes in, it will will try and give each thread a fair share of the CPU time. If a thread goes into a wait state (e.g. waiting for a database call), the thread will be marked as paused and a different thread is allocated to the OS thread - this is known as a context switch.
+There will typically be more runnable Java threads than there are OS threads (cores), this is where the OS scheduler comes in, it will will try and give each thread a fair share of the CPU time, and eventually preempt a running thread so another can use the CPU. If a thread blocks (e.g. waiting on a lock or blocking I/O) the OS will usually suspend it and switch it out with another one. Both of these are examples of a _context switch_.
 
-TODO: so what is cost here? 
+A context switch is not free as it involves both the OS and the JVM, and when the new thread is switched in, it's unlikely the data it needs is in the processor local cache/register, resulting in lots of (slow) reads through to main memory.  
 
 #### Slow creation
-Creating Threads  requires allocating OS resources, which is slow.
+Creating Threads is expensive as it requires allocating OS resources, which is slow.
 
-Things which cost a lot to create are typically pooled, and that's why we have the various flavours of `ExecutorService`. And if there's not enough threads in the pool to support the all the concurrent tasks that needs to run at a single point in time? They generally have to wait in line, with the risk of been rejected. Asynchronous programming is an approach to address this, but not everything fits this approach.  
+Resources that cost a lot to create are typically pooled, and that's why we have the various flavours of `ExecutorService`. And if there's not enough threads in the pool to support all the concurrent tasks that need to run? They generally have to wait in line, with the risk of been rejected. Asynchronous programming is an approach to address this, but not everything fits this approach.  
 
 #### So what can we do?
 This is probably as good as it gets, a cached thread pool that will create new threads as needed, but will reuse previously constructed threads when they are available - the only limitation for a cached thread pool is the available system resources, as we've observed already when we ran out of native OS threads.
@@ -50,7 +52,7 @@ static void go(Runnable r) {
 ```
     
 ### How does go do it better?
-TODO
+A goroutine is described as a _lightweight thread managed by the Go runtime_ ([tour.golang.org](https://tour.golang.org/concurrency/1)). It's that last bit that's most relevant, _managed by the Go runtime_, as opposed to the OS; the runtime does this by multiplexing many goroutines onto single OS threads (up to `GOMAXPROCS`), handling the scheduling itself, and been able to dynamically grow and shrink stack sizes (which can be a few kb in size).   
 
 ### How can we make Java more like go?
 So what can we do about this? Use a better JVM :) And there is one out there, it's under development, and its called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) and is part of the OpenJDK community.
@@ -67,7 +69,7 @@ static void go(Runnable r) {
    Thread.startVirtualThread(r);
 }
 ```
-A virtual thread is a (type of) `java.lang.Thread` — it's not a wrapper around an OS thread, but a Java object, known to the VM, and under the direct control of the Java runtime which, unlike the original Java platform thread's 1:1 mapping, maps (multiplexes) multiple virtual threads onto an OS thread:
+A virtual thread is a (type of) `java.lang.Thread` — but it's not a wrapper around an OS thread, rather a Java object, known to the VM, and under the direct control of the Java runtime which, unlike the original Java platform thread's 1:1 mapping, maps (multiplexes) multiple virtual threads onto an OS thread (and yes, this is very much like how the go runtime does it):
 
 ![`Threads`](img/threads.png)
 
@@ -80,13 +82,40 @@ The JVM, and not the OS scheduler, controls the execution, suspending and resumi
 ### Lets do some testing!
 
 #### Thread volume
-Lets start off with understanding difference in number of threads that can be created. 
+Let's start off with understanding the difference in the number of Java Thread's that can be created. 
 
-As noted earlier, my mac OS limits a user to the creation of 2048 OS threads, so I can only create 2048 Java Threads. So if I create 2048 virtual threads, how many OS threads will they be multiplex onto? The answer is .. 26 for my run, as can be seen from this JConsole:  
+As noted earlier, my mac OS limits a user to the creation of 2048 OS threads, so, given the 1:1 mapping, I can only create 2048 Java Threads. If I create 2048 _virtual_ threads, how many OS threads will they be multiplex onto? The answer is 26, a ratio of ~80:1. Both test's were run using [ThreadNumberTest](/src/test/java/com/github/stehrn/go/ThreadNumberTest.java) and JConsole:   
   
 ![`loom`](img/jconsole_loom.png)
 
-(these tests we're performed using [ThreadNumberTest.java](/src/test/java/com/github/stehrn/go/ThreadNumberTest.java))
+So whats the upper limit, how many virtual threads can I create? 
+
+On my mac OS I could create 3,680,000 virtual threads, mapped to, again, 26 OS threads.  
+
+#### Native memory usage
+We noted Java thread stacks use up a lot of native memory, lets see how much by using the `-XX:NativeMemoryTracking=summary` [JVM flag]([Oracle website](https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/tooldescr007.html)) and viewing the summary via: `jcmd <pid> VM.native_memory summary`
+
+Java 8 test, creating 2048 threads, using the default stack size (1MB): 
+```
+ Thread (reserved=2099667KB, committed=2099667KB)
+ (thread #2048)
+ (stack: reserved=2094080KB, committed=2094080KB)
+```
+We have a whopping ~2GB of native memory allocated by the 2048 thread stacks (2048*1MB)
+
+We can tune things here, reducing the stack size to 200k (`-Xss200k`) brings allocated memory down to 416MB:
+```
+Thread (reserved=422003KB, committed=422003KB)
+(thread #2045)
+(stack: reserved=416416KB, committed=416416KB)
+```
+Now lets look at Loom, creating 2048 threads:
+```
+Thread (reserved=28744KB, committed=28744KB)
+(thread #28)
+(stack: reserved=28672KB, committed=28672KB)
+```
+It's mapping 2048 virtual threads onto the 28 OS level threads, native memory usage is only 28MB, implying each stack is only 14k (the JVM, incidentally, wont let us set a stack so small, its platform specific, but on my mac the minimum is 144k).
 
 #### Thread xxx
 
