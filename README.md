@@ -21,7 +21,7 @@ If you try and create too many OS threads you'll get:
 ```java
 [error] (run-main-0) java.lang.OutOfMemoryError: unable to create native thread
 ```
-On my macbook I could create 2048 threads before "running out of memory", this is actually linked to the `kern.num_taskthreads` setting of 2048, so problem here was not so much to do with memory, but the number of threads the OS supports for my user. All platforms will impost limits though.  
+On my macbook (2.2 GHz Intel Core i7, 16 GB 1600 MHz DDR3) I could create 2048 threads before "running out of memory", this is actually linked to the `kern.num_taskthreads` setting of 2048, so problem here was not so much to do with memory, but the number of threads the OS supports for my user. All platforms will impost limits though.  
 
 #### Large thread stack size 
 OS threads have a high memory footprint because each thread has a fixed (stack) size - the (64-bit) default is 1MB, and whilst this can be reduced using the `-Xss` flag, setting it too low will lead to a runtime `StackOverflowError`, at this point you need to increase stack size, or re-write the code to use less stack space (e.g. remove recursive method calls).
@@ -54,6 +54,8 @@ static void go(Runnable r) {
 ### How does go do it better?
 A goroutine is described as a _lightweight thread managed by the Go runtime_ ([tour.golang.org](https://tour.golang.org/concurrency/1)). It's that last bit that's most relevant, _managed by the Go runtime_, as opposed to the OS; the runtime does this by multiplexing many goroutines onto single OS threads (up to `GOMAXPROCS`), handling the scheduling itself, and been able to dynamically grow and shrink stack sizes (which can be a few kb in size).   
 
+Even if threads are cheap to create and take up less memory, as the number of threads grows, the effort to schedule them could quickly hit performance. Go has a solution - it will only schedule a thread when it knows it can do useful work, otherwise (mostly) idle threads are mapped onto its their own OS thread.
+
 ### How can we make Java more like go?
 So what can we do about this? Use a better JVM :) And there is one out there, it's under development, and its called [Project Loom](https://wiki.openjdk.java.net/display/loom/Main) and is part of the OpenJDK community.
 
@@ -84,7 +86,11 @@ The JVM, and not the OS scheduler, controls the execution, suspending and resumi
 #### Thread volume
 Let's start off with understanding the difference in the number of Java Thread's that can be created. 
 
-As noted earlier, my mac OS limits a user to the creation of 2048 OS threads, so, given the 1:1 mapping, I can only create 2048 Java Threads. If I create 2048 _virtual_ threads, how many OS threads will they be multiplex onto? The answer is 26, a ratio of ~80:1. Both test's were run using [ThreadNumberTest](/src/test/java/com/github/stehrn/go/ThreadNumberTest.java) and JConsole:   
+As noted earlier, my mac OS limits a user to the creation of 2048 OS threads, so, given the 1:1 mapping, I can only create 2048 Java Threads. If I create 2048 _virtual_ threads, how many OS threads will they be multiplex onto? 
+
+By default, the mapping from virtual threads to OS threads is done with a fork join pool which sizes itself to  `Runtime.getRuntime().availableProcessors()`, my mac has 8 cores, so I'd expect to see 8 threads, or a ratio of 256:1.
+ 
+This is verified by using [ThreadNumberTest](/src/test/java/com/github/stehrn/go/ThreadNumberTest.java) and JConsole (number of fork-join worker threads is 8, as expected):   
   
 ![`loom`](img/jconsole_loom.png)
 
@@ -117,8 +123,16 @@ Thread (reserved=28744KB, committed=28744KB)
 ```
 It's mapping 2048 virtual threads onto the 28 OS level threads, native memory usage is only 28MB, implying each stack is only 14k (the JVM, incidentally, wont let us set a stack so small, its platform specific, but on my mac the minimum is 144k).
 
-#### Thread xxx
+#### Performance
+The average time taken to start 2048 threads using Loom is about half the time it takes on Java 8, not surprising given fewer OS threads are used.
 
+We could do some testing around context switching costs as well, by simulating thread blocking, that's probably a separate article in itself.
+  
+### Summary 
+It's important to understand where Project Loom can help, and where it can't. If you have many computationally intensive tasks and want to keep all processor cores busy, spawning lots of virtual threads won't help you, in fact, it will make things worse. Here, consider a thread pool, sized to match the number of cores, and if you can't run through tasks quickly enough, get a machine with more cores (scale horizontally), or re-architect things to scale out vertically - if you're using containers, look into Kubernetes load balancing, replica counts, and autoscaling. Project Loom is most useful when you have lots of tasks that spend a good portion of their time blocking.
+
+So you can have goroutine like scaling in Java though the use of the Loom OpenJDK, just not in production quite yet, given only early access binaries are available for now http://jdk.java.net/loom/.
+  
 
 ## Channels
 When data needs to be shared between routines, a `Channel` will act as a pipe and guarantee the synchronous exchange of data. 

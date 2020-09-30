@@ -13,7 +13,7 @@ public class Routine {
     static final ExecutorService service = Executors.newCachedThreadPool();
 
     static void go(Runnable r) {
-        //service.submit(r);
-        Thread.startVirtualThread(r);
+        service.submit(r);
+        //Thread.startVirtualThread(r);
     }
 }
